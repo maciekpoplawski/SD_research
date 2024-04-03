@@ -2,8 +2,11 @@ import os
 import re
 import json
 import base64
+import concurrent.futures
+from queue import Queue
 
 import requests
+from tqdm import tqdm
 
 
 def change_model(settings):
@@ -56,7 +59,7 @@ def sanitize_for_path(value):
     return "".join(c if c.isalnum() or c in " _-" else "_" for c in value)
 
 
-def existing_files_overwrite_protection():
+def existing_files_overwrite_protection(settings):
     full_model_name = settings.get('model_name')
     model_name = full_model_name.split('.safetensors')[0]
     main_directory = f"generations_on_{model_name}"
@@ -70,6 +73,9 @@ def existing_files_overwrite_protection():
 
         if response.lower() != "y":
             print("Exiting...")
+            exit(0)
+        else:
+            print("Yeah right... Exiting but for DUMB PEOPLE...")
             exit(0)
 
 
@@ -115,7 +121,7 @@ def generate_image(prompt, settings, seed):
             img_path = os.path.join(output_directory, f"image_{max_index + i + 1}_seed_{seed}.png")
             with open(img_path, "wb") as f:
                 f.write(img_bytes)
-            print(f"Saved: {img_path}")
+            # print(f"Saved: {img_path}")
     else:
         print(f"Failed to get a response from {api_url}, status code: {response.status_code}")
 
@@ -125,43 +131,77 @@ def load_json(file_path):
         return json.load(file)
 
 
-# Prompt user for the settings file name
-settings_file_name = input("Please enter the name of the settings JSON file (e.g., settings_1.json): ")
+def list_settings_files(directory):
+    """List all settings JSON files in the directory."""
+    return [f for f in os.listdir(directory) if f.startswith('settings_') and f.endswith('.json')]
 
-# Constructing the full file path assuming the file is in the current directory
-settings_file_path = os.path.join(os.getcwd(), settings_file_name)
 
-# Load settings
-if os.path.exists(settings_file_path):
-    settings = load_json(settings_file_path)
-else:
-    print(f"Settings file not found: {settings_file_path}")
-    exit(1)
+def process_settings_file(settings_file, api_address):
+    """Process a settings file with a specific API."""
+    print(f"Processing {settings_file} with API {api_address}")
 
-# Check if the output directory already exists and prompt the user to confirm overwriting
-existing_files_overwrite_protection()
+    settings_path = os.path.join(os.getcwd(), settings_file)
+    settings = load_json(settings_path)
 
-# Load seeds from random_seeds.txt
-with open("random_seeds.txt", "r") as file:
-    seeds = [int(line.strip()) for line in file.readlines()]
+    # Add the API address to settings dynamically
+    settings['backend_api'] = api_address
 
-# Load the prompts from prompts.json
-with open('prompts.json', 'r') as file:
-    prompts_data = json.load(file)
+    # Check if the output directory already exists and prompt the user to confirm overwriting
+    existing_files_overwrite_protection(settings)
 
-# Change the model to the one specified in the settings
-change_model(settings)
+    # Load seeds from random_seeds.txt
+    with open("random_seeds.txt", "r") as file:
+        seeds = [int(line.strip()) for line in file.readlines()]
 
-prompts = prompts_data['prompts']
-seed_index = 0  # Start from the first seed
+    # Load the prompts from prompts.json
+    with open('prompts.json', 'r') as file:
+        prompts_data = json.load(file)
 
-for prompt in prompts:
-    for _ in range(settings.get("number_of_generations_per_prompt", 1)):
-        # Make sure we don't run out of seeds
-        if seed_index < len(seeds):
-            seed = seeds[seed_index]
-            generate_image(prompt, settings, seed)
-            seed_index += 1
-        else:
-            print("Ran out of seeds.")
-    seed_index = 0  # Reset seed index for the next prompt
+    # Optionally print out which model is being changed to
+    print(f"Changing model to: {settings.get('model_name')}")
+    # Change the model to the one specified in the settings
+    change_model(settings)
+
+    prompts = prompts_data['prompts']
+    seed_index = 0  # Start from the first seed
+
+    # Iterate over prompts with a progress bar
+    for prompt in tqdm(prompts, desc="Generating images"):
+        for _ in range(settings.get("number_of_generations_per_prompt", 1)):
+            # Make sure we don't run out of seeds
+            if seed_index < len(seeds):
+                seed = seeds[seed_index]
+                # print(f"Generating image for '{prompt}' with seed {seed}")
+                generate_image(prompt, settings, seed)
+                seed_index += 1
+            else:
+                print("Ran out of seeds.")
+                break  # Break out of the loop if out of seeds
+        seed_index = 0  # Reset seed index for the next prompt
+
+    print(f"Finished processing {settings_file} with API {api_address}")
+
+
+def main(apis):
+    settings_files = list_settings_files(os.getcwd())
+    settings_queue = Queue()
+
+    # Fill the queue with settings files
+    for settings_file in settings_files:
+        settings_queue.put(settings_file)
+
+    def worker(api):
+        while not settings_queue.empty():
+            settings_file = settings_queue.get()
+            if settings_file is None:
+                break  # If a None item is retrieved, stop the worker
+            process_settings_file(settings_file, api)
+            settings_queue.task_done()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(apis)) as executor:
+        futures = [executor.submit(worker, api) for api in apis]
+
+
+if __name__ == "__main__":
+    apis = ["http://127.0.0.1:7860", "http://127.0.0.1:7861"]
+    main(apis)

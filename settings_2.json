@@ -1,7 +1,6 @@
 {
-    "backend_api": "http://127.0.0.1:7860",
     "model_name": "ghostmix_v20Bakedvae.safetensors [e3edb8a26f]",
-    "number_of_generations_per_prompt": 5,
+    "number_of_generations_per_prompt": 1,
     "cfg_scale": 7,
     "steps": 20,
     "sampler_name": "DPM++ 2M Karras",
